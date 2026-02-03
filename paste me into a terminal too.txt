@@ -1,0 +1,87 @@
+cat > ~/setup_oakdev.sh <<'BASH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+BASE="$HOME/Desktop/oak_4_test"
+REPO_URL="https://github.com/luxonis/depthai-core.git"
+REPO_DIR="$BASE/depthai-core"
+VENV_DIR="$REPO_DIR/venv"
+
+mkdir -p "$BASE"
+
+# Pick python for venv creation:
+# Prefer pyenv 3.8.20 if available, else fall back to python3
+PYTHON_BIN="python3"
+if command -v pyenv >/dev/null 2>&1; then
+  if pyenv versions --bare | grep -qx "3.8.20"; then
+    PYTHON_BIN="$(pyenv prefix 3.8.20)/bin/python"
+  else
+    # current pyenv python if set
+    PYTHON_BIN="$(pyenv which python || echo python3)"
+  fi
+fi
+
+# Clone repo
+if [ ! -d "$REPO_DIR/.git" ]; then
+  git clone "$REPO_URL" "$REPO_DIR"
+fi
+
+cd "$REPO_DIR"
+
+# Create venv if missing
+if [ ! -d "$VENV_DIR" ]; then
+  "$PYTHON_BIN" -m venv "$VENV_DIR"
+fi
+
+# Install python deps inside venv (no reliance on shell activation)
+"$VENV_DIR/bin/python" -m pip install --upgrade pip setuptools wheel
+"$VENV_DIR/bin/python" examples/python/install_requirements.py
+
+# VS Code: force interpreter to venv for this folder
+mkdir -p "$REPO_DIR/.vscode"
+cat > "$REPO_DIR/.vscode/settings.json" <<'JSON'
+{
+  "python.defaultInterpreterPath": "${workspaceFolder}/venv/bin/python",
+  "python.terminal.activateEnvironment": true
+}
+JSON
+
+# Add oakdev function to your shell rc
+if [[ "${SHELL:-}" == *zsh ]]; then
+  RC_FILE="$HOME/.zshrc"
+else
+  RC_FILE="$HOME/.bashrc"
+fi
+touch "$RC_FILE"
+
+MARK_BEGIN="# >>> oakdev >>>"
+MARK_END="# <<< oakdev <<<"
+TMP="$(mktemp)"
+
+# Remove existing oakdev block if present
+awk -v begin="$MARK_BEGIN" -v end="$MARK_END" '
+  $0==begin {inblock=1; next}
+  $0==end {inblock=0; next}
+  !inblock {print}
+' "$RC_FILE" > "$TMP"
+
+cat >> "$TMP" <<EOF
+
+$MARK_BEGIN
+oakdev() {
+  cd "$REPO_DIR" || return
+  source "$VENV_DIR/bin/activate"
+}
+$MARK_END
+EOF
+
+mv "$TMP" "$RC_FILE"
+
+echo "Setup complete."
+echo "Restart your terminal or run: source \"$RC_FILE\""
+echo "Then: oakdev"
+echo "Test: python examples/python/Camera/camera_all.py"
+BASH
+
+chmod +x ~/setup_oakdev.sh
+~/setup_oakdev.sh
