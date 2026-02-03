@@ -1,0 +1,148 @@
+sudo bash -euxo pipefail <<'EOF'
+export DEBIAN_FRONTEND=noninteractive
+
+# ---------------------------
+# 0) Base APT packages (only what you listed)
+# ---------------------------
+apt-get update -y
+apt-get install -y \
+  network-manager \
+  curl \
+  wget \
+  ca-certificates \
+  gnupg \
+  net-tools \
+  lsb-release \
+  python3 \
+  python3-pip \
+  python3-venv \
+  cmake \
+  pkg-config
+
+systemctl enable --now NetworkManager || true
+
+# ---------------------------
+# 1) Python 3.13 via Deadsnakes PPA (Noble 24.04)
+#    Note: we do NOT change /usr/bin/python3. We use python3.13 for the venv.
+# ---------------------------
+CODENAME="$(lsb_release -sc || true)"
+if [ "$CODENAME" != "noble" ]; then
+  echo "WARNING: Detected codename '$CODENAME'. This script is intended for Kubuntu 24.04 (noble)."
+fi
+
+install -d -m 0755 /usr/share/keyrings
+
+# Deadsnakes signing key fingerprint (from Launchpad PPA page)
+DEADSNAKES_KEY_FPR="F23C5A6CF475977595C89F51BA6932366A755776"
+DEADSNAKES_KEY_URL="https://keyserver.ubuntu.com/pks/lookup?op=get&search=0xBA6932366A755776"
+DEADSNAKES_KEYRING="/usr/share/keyrings/deadsnakes-ppa.gpg"
+
+# Import key into a modern keyring file
+curl -fsSL "$DEADSNAKES_KEY_URL" | gpg --dearmor -o "$DEADSNAKES_KEYRING"
+chmod 0644 "$DEADSNAKES_KEYRING"
+
+# Add PPA source (manual, avoids installing software-properties-common)
+cat >/etc/apt/sources.list.d/deadsnakes-ppa.list <<SRC
+deb [signed-by=$DEADSNAKES_KEYRING] https://ppa.launchpadcontent.net/deadsnakes/ppa/ubuntu ${CODENAME} main
+SRC
+
+apt-get update -y
+
+# Install Python 3.13 "etc" packages
+# -distutils included to avoid common pip/distutils issues with non-default Pythons from Deadsnakes
+apt-get install -y \
+  python3.13 \
+  python3.13-venv \
+  python3.13-dev \
+  python3.13-distutils
+
+python3.13 --version
+
+# ---------------------------
+# 2) Create venv and install only your PIP packages
+# ---------------------------
+TARGET_USER="${SUDO_USER:-}"
+if [ -z "$TARGET_USER" ]; then
+  TARGET_USER="$(logname 2>/dev/null || true)"
+fi
+if [ -z "$TARGET_USER" ] || ! id "$TARGET_USER" >/dev/null 2>&1; then
+  echo "ERROR: Could not determine a non-root user for venv creation."
+  exit 1
+fi
+
+TARGET_HOME="$(getent passwd "$TARGET_USER" | cut -d: -f6)"
+VENV_DIR="${TARGET_HOME}/gokart_py/.venv"
+
+sudo -u "$TARGET_USER" -H bash -lc "python3.13 -m venv '$VENV_DIR'"
+sudo -u "$TARGET_USER" -H bash -lc "source '$VENV_DIR/bin/activate' && python -m pip install -U pip setuptools wheel"
+
+# Only the PIP packages you listed
+PIP_PKGS=(
+  depthai
+  depthai-sdk
+  opencv-python
+  numpy
+  scipy
+  pandas
+  matplotlib
+  pyqtgraph
+  PyQt5
+  pyserial
+  pynmea2
+  python-can
+  cantools
+  psutil
+  netifaces
+  pyyaml
+  ruamel.yaml
+  requests
+  aiohttp
+  websockets
+  protobuf
+  flatbuffers
+  onnxruntime
+  pillow
+  tqdm
+  rich
+  scikit-image
+  scikit-learn
+  shapely
+  beamngpy
+)
+
+# To respect your "only these" APT constraint, we avoid compiling from source:
+# install wheels only. Any package lacking a wheel for Python 3.13 will be reported.
+FAIL_PKGS=()
+for pkg in "${PIP_PKGS[@]}"; do
+  if ! sudo -u "$TARGET_USER" -H bash -lc "source '$VENV_DIR/bin/activate' && pip install --only-binary=:all: '$pkg'"; then
+    FAIL_PKGS+=("$pkg")
+  fi
+done
+
+if [ "${#FAIL_PKGS[@]}" -gt 0 ]; then
+  echo ""
+  echo "WARNING: Some pip installs failed (likely no wheel for Python 3.13):"
+  printf '  - %s\n' "${FAIL_PKGS[@]}"
+  echo "If you need those, either use Python 3.12 for the venv or relax APT constraints to allow build dependencies."
+fi
+
+echo ""
+echo "Venv ready:"
+echo "  source '$VENV_DIR/bin/activate'"
+
+# ---------------------------
+# 3) VS Code install (prefer snap if available, otherwise official .deb)
+# ---------------------------
+if command -v snap >/dev/null 2>&1; then
+  # Snap path you requested
+  snap install code --classic || true
+else
+  # Fallback: official .deb method (still uses only wget/apt that you already listed)
+  TMP_DEB="/tmp/vscode_latest_amd64.deb"
+  wget -qO "$TMP_DEB" "https://code.visualstudio.com/sha/download?build=stable&os=linux-deb-x64"
+  apt-get install -y "$TMP_DEB" || true
+fi
+
+echo ""
+echo "Done."
+EOF
